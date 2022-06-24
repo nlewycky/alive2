@@ -147,7 +147,7 @@ add_dependencies(util generate_version)
 set(ALIVE_LIBS ir smt tools util)
 
 
-if (BUILD_LLVM_UTILS OR BUILD_TV)
+if (BUILD_LLVM_UTILS OR BUILD_TV OR BUILD_CF)
   find_package(LLVM REQUIRED CONFIG)
 
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
@@ -185,12 +185,14 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
     "tools/alive-exec.cpp"
   )
 
+  if (BUILD_CF)
+    add_llvm_executable(alive-cf
+      "cf/cf.cpp"
+    )
+  endif()
+
 else()
   set(LLVM_UTIL_SRCS "")
-endif()
-
-if (BUILD_CF)
-  add_subdirectory(cf)
 endif()
 
 if (BUILD_TV)
@@ -229,11 +231,16 @@ add_executable(alive-jobserver
 
 #add_library(alive2 SHARED ${IR_SRCS} ${SMT_SRCS} ${TOOLS_SRCS} ${UTIL_SRCS} ${LLVM_UTIL_SRCS})
 
-if (BUILD_LLVM_UTILS OR BUILD_TV)
+if (BUILD_LLVM_UTILS OR BUILD_TV OR BUILD_CF)
   llvm_map_components_to_libnames(llvm_libs support core irreader analysis passes transformutils)
 #  target_link_libraries(alive2 PRIVATE ${llvm_libs})
-  target_link_libraries(alive-tv PRIVATE ${ALIVE_LIBS_LLVM} ${llvm_libs})
-  target_link_libraries(alive-exec PRIVATE ${ALIVE_LIBS_LLVM} ${llvm_libs})
+  if (BUILD_TV)
+    target_link_libraries(alive-tv PRIVATE ${ALIVE_LIBS_LLVM} ${llvm_libs})
+    target_link_libraries(alive-exec PRIVATE ${ALIVE_LIBS_LLVM} ${llvm_libs})
+  endif()
+  if (BUILD_CF)
+    target_link_libraries(alive-cf PRIVATE ${ALIVE_LIBS_LLVM} ${llvm_libs})
+  endif()
 endif()
 
 if (CYGWIN)
@@ -248,6 +255,9 @@ else()
   if (BUILD_LLVM_UTILS OR BUILD_TV)
     target_link_libraries(alive-tv PRIVATE ${Z3_LIBRARIES})
     target_link_libraries(alive-exec PRIVATE ${Z3_LIBRARIES})
+  endif()
+  if (BUILD_CF)
+    target_link_libraries(alive-cf PRIVATE ${Z3_LIBRARIES})
   endif()
 endif()
 

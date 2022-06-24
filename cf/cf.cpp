@@ -9,12 +9,23 @@
 #include <utility>
 #include <vector>
 
+#include "llvm/IR/Argument.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Value.h"
+
 #include "llvm_util/llvm2alive.h"
 #include "llvm_util/utils.h"
 
 #include "adjacency-list.h"
 
-static const int size = 12;
+// TODO: scale up during a run, just have a max.
+static const int size = 5;
 
 namespace {
 
@@ -102,10 +113,10 @@ int eval_op(Ops op, const std::vector<int> &v) {
   case Shl:
     return ((unsigned)v[0] << (unsigned)v[1]) & eval_max;
   case LShr:
-    return (unsigned)v[0] << (unsigned)v[1];
+    return (unsigned)v[0] >> (unsigned)v[1];
   case AShr:
     if ((unsigned)v[1] > sizeof(signed)) return eval_max - 7;
-    return ((signed)v[0] << (signed)v[1]) & eval_max;
+    return ((signed)v[0] >> (signed)v[1]) & eval_max;
   case And:
     return v[0] & v[1];
   case Or:
@@ -157,17 +168,138 @@ int eval(const SimpleRootedDigraph &g, const std::vector<Ops> &ops) {
   return values[0].value();
 }
 
+llvm::FunctionType *build_llvm_functiontype(int free_variables_count,
+                                            llvm::LLVMContext &C) {
+  llvm::Type *i32 = llvm::Type::getInt32Ty(C);
+  std::vector<llvm::Type*> Params;
+  for (int i = 0; i != free_variables_count; ++i)
+    Params.push_back(i32);
+  return llvm::FunctionType::get(i32, Params, false);
+}
+
+llvm::Value *build_llvm_op(Ops o, llvm::BasicBlock *BB,
+                           const std::vector<llvm::Value *> &operands) {
+  switch (o) {
+  case Add:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::Add,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case Sub:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::Sub,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case Mul:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::Mul,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case UDiv:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::UDiv,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case SDiv:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::SDiv,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case URem:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::URem,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case SRem:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::SRem,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case Shl:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::Shl,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case LShr:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::LShr,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case AShr:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::AShr,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case And:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::And,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case Or:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::Or,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  case Xor:
+    assert(operands.size() == 2);
+    return llvm::BinaryOperator::Create(llvm::Instruction::BinaryOps::Xor,
+                                        operands[0], operands[1], llvm::Twine(),
+                                        BB);
+  }
+  std::abort();
+}
+
+llvm::Function *build_llvm(const SimpleRootedDigraph &g,
+                           const std::vector<Ops> &ops,
+                           int free_variables, llvm::FunctionType *FTy,
+                           llvm::Module *M) {
+  llvm::Function *F =
+    llvm::Function::Create(FTy, llvm::GlobalValue::ExternalLinkage, "", M);
+  llvm::BasicBlock *BB = llvm::BasicBlock::Create(FTy->getContext(), "", F);
+
+  auto x = g.graph();
+  std::vector<std::pair<int, int>> node_stack;
+  std::vector<std::optional<llvm::Value *>> values;
+  values.resize(g.size());
+  node_stack.emplace_back(0, 0);
+  llvm::Function::arg_iterator AI = F->arg_begin();
+  do {
+  top:
+    auto &[node, adj_i] = node_stack.back();
+    assert(!values[node].has_value());
+    auto &adj_list = x[node];
+    for (int adj_list_length = adj_list.size(); adj_i != adj_list_length;
+         ++adj_i) {
+      if (!values[adj_list[adj_i]].has_value()) {
+        // Stop, proceed to the child node now.
+        node_stack.emplace_back(adj_list[adj_i], 0);
+        goto top;
+      }
+    }
+    std::vector<llvm::Value *> adj_values;
+    adj_values.reserve(out_edges(ops[node]));
+    for (auto adj : adj_list) {
+      assert(values[adj].has_value());
+      adj_values.emplace_back(values[adj].value());
+    }
+    while (adj_values.size() < out_edges(ops[node])) {
+      adj_values.push_back(AI);
+      ++AI;
+    }
+    values[node] = build_llvm_op(ops[node], BB, adj_values);
+    node_stack.pop_back(); // kills 'node' and 'adj_i'
+  } while (!values[0]);
+
+  llvm::ReturnInst::Create(FTy->getContext(), values[0].value(), BB);
+
+  return F;
+}
+
 }
 
 int main(void) {
-  /*
-  llvm::LLVMContext C;
-  llvm::FunctionType *FTy = FunctionType::get(Type::getVoidType(C), 0);
-
-  llvm::Module M("", C);
-  llvm::Function *F = llvm::cast<Function>(M.getOrInsertFunction("", FTy));
-  llvm::
-  */
+  llvm::LLVMContext Context;
+  llvm::Module M("", Context);
 
   // We want to efficiently generate every possible DAG of expressions on the
   // operators we want to fold.
@@ -201,9 +333,8 @@ int main(void) {
   // - We now have a graph with an assignment of operators to nodes.
 
   std::vector<std::tuple<uint8_t, uint8_t>> out_degree;
-  for (int i = 0; i < size; ++i) {
+  for (int i = 0; i < size; ++i)
     out_degree.emplace_back(UINT8_C(2), UINT8_C(2));
-  }
 
   std::vector<SimpleRootedDigraph> v;
   v.emplace_back(SimpleRootedDigraph(out_degree));
@@ -264,9 +395,8 @@ int main(void) {
   } while (!v.empty());
 
   std::vector<Ops> ops;
-  for (int i = 0; i < size; ++i) {
+  for (int i = 0; i < size; ++i)
     ops.push_back(Add);
-  }
 
   // After assigning operators we can determine how many free variables there
   // are on the expression. We group our expressions based on how many free
@@ -291,6 +421,7 @@ int main(void) {
     }
     do {
       int bucket = eval(graph, ops);
+      assert(bucket <= eval_max);
       buckets[free_variable_count][bucket].emplace_back(graph, ops);
     } while (advance<Ops, FirstOp, LastOp>(ops));
   }
@@ -302,6 +433,19 @@ int main(void) {
     for (int i = 0; i != eval_max; ++i) {
       if (buckets[free_variable_count][i].size() < 2)
         continue;
+      llvm::FunctionType *FTy = build_llvm_functiontype(free_variable_count, Context);
+      std::vector<llvm::Function *> Fns;
+      for (const auto &[graph, ops] : buckets[free_variable_count][i])
+        Fns.push_back(build_llvm(graph, ops, free_variable_count, FTy, &M));
+      /*
+      for (int j = 0, je = buckets[free_variable_count][i].size(); j != je;
+           ++j) {
+        const auto &[graph1, ops1] = buckets[free_variable_count][i][j];
+        const auto &[graph2, ops2] = buckets[free_variable_count][i][j + 1 == je ? 0 : j + 1];
+        
+      }
+      */
+      //
       // TODO: All these [graph, ops] are probably equivalent. Test them!
       //for (const auto &[graph, ops] : buckets[free_variable_count][i]) {
       //  emit_llvm_ir...
