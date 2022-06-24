@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <set>
@@ -9,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -19,8 +21,12 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 
+#include "ir/function.h"
 #include "llvm_util/llvm2alive.h"
 #include "llvm_util/utils.h"
+#include "smt/smt.h"
+#include "tools/transform.h"
+#include "util/errors.h"
 
 #include "adjacency-list.h"
 
@@ -86,7 +92,7 @@ unsigned out_edges(Ops op) {
 // We implement our own evaluator so we can burn through all the obvious
 // non-matches quickly and without involving memory allocation before creating
 // LLVM IR and sending them to alive.
-constexpr int eval_max = 0x7ff;
+constexpr unsigned eval_max = 0x7ff;
 int eval_op(Ops op, const std::vector<int> &v) {
   assert(v.size() == 2);
   switch (op) {
@@ -102,7 +108,7 @@ int eval_op(Ops op, const std::vector<int> &v) {
   case SDiv:
     if (v[1] == 0) return eval_max - 2;
     if (v[0] == INT_MIN && v[1] == -1) return eval_max - 3;
-    return ((signed)v[0] / (signed)v[1]) & eval_max;
+    return (unsigned)(((signed)v[0] / (signed)v[1])) & eval_max;
   case URem:
     if (v[1] == 0) return eval_max - 4;
     return ((unsigned)v[0] % (unsigned)v[1]) & eval_max;
@@ -300,6 +306,11 @@ llvm::Function *build_llvm(const SimpleRootedDigraph &g,
 int main(void) {
   llvm::LLVMContext Context;
   llvm::Module M("", Context);
+  llvm::TargetLibraryInfoImpl TLI_impl;
+  llvm::TargetLibraryInfo TLI(TLI_impl);
+
+  llvm_util::initializer llvm_util_init(std::cerr, M.getDataLayout());
+  smt::smt_initializer smt_init;
 
   // We want to efficiently generate every possible DAG of expressions on the
   // operators we want to fold.
@@ -339,7 +350,6 @@ int main(void) {
   std::vector<SimpleRootedDigraph> v;
   v.emplace_back(SimpleRootedDigraph(out_degree));
 
-  int count = 0;
 #ifndef NDEBUG
   std::map<int, SimpleRootedDigraph> hashes;
 #else
@@ -377,13 +387,9 @@ int main(void) {
                     v2.back().dump();
                     std::abort();
                   }
-                } else {
-                  ++count;
                 }
 #else
-                auto [it, did_insert] = hashes.insert(hash);
-                if (did_insert)
-                  ++count;
+                hashes.insert(hash);
 #endif
               }
             }
@@ -433,26 +439,48 @@ int main(void) {
     for (int i = 0; i != eval_max; ++i) {
       if (buckets[free_variable_count][i].size() < 2)
         continue;
-      llvm::FunctionType *FTy = build_llvm_functiontype(free_variable_count, Context);
-      std::vector<llvm::Function *> Fns;
-      for (const auto &[graph, ops] : buckets[free_variable_count][i])
-        Fns.push_back(build_llvm(graph, ops, free_variable_count, FTy, &M));
-      /*
-      for (int j = 0, je = buckets[free_variable_count][i].size(); j != je;
-           ++j) {
-        const auto &[graph1, ops1] = buckets[free_variable_count][i][j];
-        const auto &[graph2, ops2] = buckets[free_variable_count][i][j + 1 == je ? 0 : j + 1];
-        
+
+      // TODO: remove this, this is for development testing.
+      if (buckets[free_variable_count][i].size() > 100)
+        continue;
+      printf("== %lu (%d)\n", buckets[free_variable_count][i].size(), i);
+
+      auto FTy = build_llvm_functiontype(free_variable_count, Context);
+      std::vector<IR::Function> Fns;
+      Fns.reserve(buckets[free_variable_count][i].size());
+      for (const auto &[graph, ops] : buckets[free_variable_count][i]) {
+        auto llvm_fn = build_llvm(graph, ops, free_variable_count, FTy, &M);
+        auto alive_fn = llvm_util::llvm2alive(*llvm_fn, TLI);
+        assert(alive_fn.has_value());
+        Fns.emplace_back(std::move(alive_fn.value()));
       }
-      */
-      //
-      // TODO: All these [graph, ops] are probably equivalent. Test them!
-      //for (const auto &[graph, ops] : buckets[free_variable_count][i]) {
-      //  emit_llvm_ir...
-      //  llvm2alive...
-      //  use alive-tv to compare 0 to 1, 1 to 2, ... n-1 to n, n to 0.
-      //  if necessary, form new equivalence classes
-      //}
+      int equivalent = 0, different = 0;
+      for (unsigned f = 0; f < Fns.size(); ++f) {
+        unsigned g = (f + 1 != Fns.size()) ? (f + 1) : 0;
+        tools::Transform t;
+        // !!!!!!!
+        t.src = std::move(Fns[f]);
+        t.tgt = std::move(Fns[g]);
+        // TODO: this is probably a no-op? unsure.
+        // t.preprocess();
+        // TODO: what does "check_each_var = true/false" do?
+        tools::TransformVerify verifier(t, false);
+        assert(verifier.getTypings());
+        if (util::Errors errs = verifier.verify()) {
+          ++different;
+        } else {
+          ++equivalent;
+        }
+        Fns[f] = std::move(t.src);
+        Fns[g] = std::move(t.tgt);
+      }
+      printf("== %u, != %u\n", equivalent, different);
+      // TODO: if necessary, form new equivalence classes.
+      // Ordinarily we expect two normal cases:
+      // 1. a small number of functions, all equivalent.
+      //    Check f0 <= f1 <= f2 <= f0 and we're done.
+      // 2. a large number of functions, many equivalence classes, lots of
+      //    which are 1-element.
     }
   }
 
