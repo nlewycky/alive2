@@ -189,6 +189,10 @@ else()
   set(LLVM_UTIL_SRCS "")
 endif()
 
+if (BUILD_CF)
+  add_subdirectory(cf)
+endif()
+
 if (BUILD_TV)
   if (CYGWIN)
     message(FATAL_ERROR "LLVM plugins not supported on cygwin")
