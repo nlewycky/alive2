@@ -19,7 +19,7 @@ public:
 
   // The out-degrees are listed as a closed range with INT_MAX meaning infinity.
   // So an edge with 2 edges out is [2, 2] while an edge with 2 or more is
-  // [2, INT_MAX] and an edge with zero through 5 is [0, 5].
+  // [2, INT_MAX] and an edge with zero through five is [0, 5].
   explicit SimpleRootedDigraph(
       std::vector<std::tuple<uint8_t, uint8_t>> &out_degree_)
       : out_degree_(out_degree_) {

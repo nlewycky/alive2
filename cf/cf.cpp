@@ -89,40 +89,52 @@ unsigned out_edges(Ops op) {
   std::abort();
 }
 
+bool commutative(Ops op) {
+  switch (op) {
+  case Add:
+  case Mul:
+  case And:
+  case Or:
+  case Xor:
+    return true;
+  default:
+    return false;
+  }
+}
+
 // We implement our own evaluator so we can burn through all the obvious
 // non-matches quickly and without involving memory allocation before creating
 // LLVM IR and sending them to alive.
-constexpr unsigned eval_max = 0x7ff;
 int eval_op(Ops op, const std::vector<int> &v) {
   assert(v.size() == 2);
   switch (op) {
   case Add:
-    return ((unsigned)v[0] + (unsigned)v[1]) & eval_max;
+    return (unsigned)v[0] + (unsigned)v[1];
   case Sub:
-    return ((unsigned)v[0] - (unsigned)v[1]) & eval_max;
+    return (unsigned)v[0] - (unsigned)v[1];
   case Mul:
-    return ((unsigned)v[0] * (unsigned)v[1]) & eval_max;
+    return (unsigned)v[0] * (unsigned)v[1];
   case UDiv:
-    if (v[1] == 0) return eval_max - 1;
-    return ((unsigned)v[0] / (unsigned)v[1]) & eval_max;
+    if (v[1] == 0) return -1;
+    return (unsigned)v[0] / (unsigned)v[1];
   case SDiv:
-    if (v[1] == 0) return eval_max - 2;
-    if (v[0] == INT_MIN && v[1] == -1) return eval_max - 3;
-    return (unsigned)(((signed)v[0] / (signed)v[1])) & eval_max;
+    if (v[1] == 0) return -1;
+    if (v[0] == INT_MIN && v[1] == -1) return -1;
+    return v[0] / v[1];
   case URem:
-    if (v[1] == 0) return eval_max - 4;
-    return ((unsigned)v[0] % (unsigned)v[1]) & eval_max;
+    if (v[1] == 0) return -1;
+    return ((unsigned)v[0] % (unsigned)v[1]);
   case SRem:
-    if (v[1] == 0) return eval_max - 5;
-    if (v[0] == INT_MIN && v[1] == -1) return eval_max - 6;
-    return ((signed)v[0] % (signed)v[1]) & eval_max;
+    if (v[1] == 0) return -1;
+    if (v[0] == INT_MIN && v[1] == -1) return -1;
+    return v[0] % v[1];
   case Shl:
-    return ((unsigned)v[0] << (unsigned)v[1]) & eval_max;
+    return (unsigned)v[0] << (unsigned)v[1];
   case LShr:
     return (unsigned)v[0] >> (unsigned)v[1];
   case AShr:
-    if ((unsigned)v[1] > sizeof(signed)) return eval_max - 7;
-    return ((signed)v[0] >> (signed)v[1]) & eval_max;
+    if ((unsigned)v[1] > sizeof(signed)) return -1;
+    return v[0] >> v[1];
   case And:
     return v[0] & v[1];
   case Or:
@@ -301,6 +313,31 @@ llvm::Function *build_llvm(const SimpleRootedDigraph &g,
   return F;
 }
 
+bool skip_commutative(const SimpleRootedDigraph &g,
+                      const std::vector<Ops> &ops) {
+  // If a node has a commutative op assigned, check that its adjacencies are in
+  // ascending order. If not, we can skip this one.
+  auto adjacency_list = g.graph();
+  for (int i = 0, e = adjacency_list.size(); i != e; ++i) {
+    if (!commutative(ops[i]))
+      continue;
+    auto node = adjacency_list[i];
+    auto [min, max] = g.out_degree_spec(i);
+    assert(max > 0);
+    // Never skip 'add %other_node, %arg' or anything with an arg in it. Args
+    // are always ordered.
+    if (g.out_degree(i) < max)
+      continue;
+    int last_out_node = node[0];
+    for (int j = 1; j != max; ++j) {
+      if (node[j] < last_out_node)
+        return true;
+      last_out_node = node[j];
+    }
+  }
+  return false;
+}
+
 }
 
 int main(void) {
@@ -410,13 +447,14 @@ int main(void) {
   // isn't using all its variables, which we scan for explicitly.
 
   // buckets[free_variable_count][eval_result][:]<0=graph, 1=ops>
+  constexpr unsigned bucket_max = 0x7ff;
   std::vector<std::vector<
       std::vector<std::tuple<SimpleRootedDigraph, std::vector<Ops>>>>>
       buckets(
           size * size,
           std::vector<
               std::vector<std::tuple<SimpleRootedDigraph, std::vector<Ops>>>>(
-              eval_max + 1)); // TODO: this wastes a little memory.
+              bucket_max + 1)); // TODO: this wastes a little memory.
 
   for (const auto &[hash, graph] : hashes) {
     std::vector<Ops> ops(size, FirstOp);
@@ -426,8 +464,14 @@ int main(void) {
           std::get<0>(graph.out_degree_spec(i)) - graph.out_degree(i);
     }
     do {
-      int bucket = eval(graph, ops);
-      assert(bucket <= eval_max);
+      // TODO: we could skip faster by advancing op[n] instead of just skipping
+      //       one at a time.
+      // TODO: we could skip faster by skipping to next known non-commutative
+      //       op instead of just trying the next op.
+      if (skip_commutative(graph, ops))
+        continue;
+      unsigned bucket = (unsigned)eval(graph, ops) & bucket_max;
+      assert(bucket <= bucket_max);
       buckets[free_variable_count][bucket].emplace_back(graph, ops);
     } while (advance<Ops, FirstOp, LastOp>(ops));
   }
@@ -436,7 +480,12 @@ int main(void) {
        free_variable_count != fe; ++free_variable_count) {
     if (buckets[free_variable_count].empty())
       continue;
-    for (int i = 0; i != eval_max; ++i) {
+    for (int i = 0; i != bucket_max; ++i) {
+      if (buckets[free_variable_count][i].size() == 0)
+        continue;
+      printf("%d %d %lu\n", free_variable_count, i,
+             buckets[free_variable_count][i].size());
+      continue;
       if (buckets[free_variable_count][i].size() < 2)
         continue;
 
