@@ -105,29 +105,22 @@ public:
   }
 
   bool all_reachable() const {
-    // "visited" indicates either we've added its adjancencies or we've added
-    // it to the node_stack.
-    std::vector<bool> visited(adjacency_list.size(), false);
-    visited[0] = true;
-    std::vector<int> node_stack;
-    node_stack.emplace_back(0);
-    do {
-      auto node = node_stack.back();
-      node_stack.pop_back();
-
-      for (int adjacent : adjacency_list[node]) {
-        if (!visited[adjacent]) {
-          visited[adjacent] = true;
-          node_stack.emplace_back(adjacent);
+    // Verify that all nodes are mentioned in the adjacency list of any node.
+    // Because the graph is acyclic, this is equivalent to all_reachable.
+    int count = adjacency_list.size() - 1;
+    std::vector<uint8_t> visited(adjacency_list.size() - 1, 0);
+    for (auto out_edge_list : adjacency_list) {
+      for (auto out_edge : out_edge_list) {
+        assert(out_edge > 0 && out_edge < adjacency_list.size());
+        if (!visited[out_edge - 1]) {
+          --count;
+          if (count == 0)
+            return true;
+          visited[out_edge - 1] = 1;
         }
       }
-    } while (!node_stack.empty());
-
-    for (bool b : visited) {
-      if (!b)
-        return false;
     }
-    return true;
+    return false;
   }
 
   // Check whether this graph contains a cycle. This data structure is never
