@@ -26,7 +26,6 @@ public:
     const int size = out_degree_.size();
     for (auto [minlen, maxlen] : out_degree_) {
       assert(minlen <= maxlen);
-      assert(minlen <= size);
       if (maxlen > size) {
         maxlen = size;
       }
@@ -213,32 +212,38 @@ private:
 };
 
 struct SimpleRootedDigraphHash {
-  uint32_t operator()(SimpleRootedDigraph const &g) const noexcept {
-    uint32_t hash = 0;
+  uint64_t operator()(SimpleRootedDigraph const &g) const noexcept {
+    uint64_t hash = 0;
     for (int x = 0, xe = g.adjacency_list.size(); x != xe; ++x) {
-      hash = hash_combine(lowbias32(x), hash);
-      for (const auto &y : g.adjacency_list[x]) {
-        hash = hash_combine(lowbias32(y), hash);
-      }
+      hash = hash_combine(hash, x);
+      hash = hash_combine(hash, g.adjacency_list[x].size());
+      for (const auto &y : g.adjacency_list[x])
+        hash = hash_combine(hash, y);
     }
     return hash;
   }
 
 private:
-  // https://github.com/skeeto/hash-prospector
-  static uint32_t lowbias32(uint32_t x) {
-    x ^= x >> 16;
-    x *= UINT32_C(0x7feb352d);
-    x ^= x >> 15;
-    x *= UINT32_C(0x846ca68b);
-    x ^= x >> 16;
-    return x;
+  // https://lemire.me/blog/2018/08/15/fast-strongly-universal-64-bit-hashing-everywhere/
+  static uint64_t murmur64(uint64_t h) {
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53L;
+    h ^= h >> 33;
+    return h;
   }
 
-  // https://stackoverflow.com/questions/2590677/how-do-i-combine-hash-values-in-c0x
-  static uint32_t hash_combine(uint32_t x, uint32_t y) {
-    return y + 0x9e3779b9 + (x << 6) + (x >> 2);
+  // https://stackoverflow.com/questions/8513911/how-to-create-a-good-hash-combine-with-64-bit-output-inspired-by-boosthash-co
+  static uint64_t hash_combine(uint64_t seed, uint64_t v) {
+    constexpr std::size_t kMul = 0x9ddfea08eb382d69ULL;
+    uint64_t a = (murmur64(v) ^ seed) * kMul;
+    a ^= (a >> 47);
+    uint64_t b = (seed ^ a) * kMul;
+    b ^= (b >> 47);
+    return b * kMul;
   }
+
 };
 
 } // namespace

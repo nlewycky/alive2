@@ -31,7 +31,7 @@
 #include "adjacency-list.h"
 
 // TODO: scale up during a run, just have a max.
-static const int size = 5;
+constexpr int size = 5;
 
 namespace {
 
@@ -152,7 +152,7 @@ int eval(const SimpleRootedDigraph &g, const std::vector<Ops> &ops) {
 
   int generated_value = 3;
   auto x = g.graph();
-  std::vector<std::pair<int, int>> node_stack;
+  std::vector<std::pair<uint8_t, uint8_t>> node_stack;
   std::vector<std::optional<int>> values;
   values.resize(g.size());
   node_stack.emplace_back(0, 0);
@@ -276,7 +276,7 @@ llvm::Function *build_llvm(const SimpleRootedDigraph &g,
   llvm::BasicBlock *BB = llvm::BasicBlock::Create(FTy->getContext(), "", F);
 
   auto x = g.graph();
-  std::vector<std::pair<int, int>> node_stack;
+  std::vector<std::pair<uint8_t, uint8_t>> node_stack;
   std::vector<std::optional<llvm::Value *>> values;
   values.resize(g.size());
   node_stack.emplace_back(0, 0);
@@ -371,7 +371,7 @@ int main(void) {
   //   * Once a graph has a cycle, adding more edges can never break the cycle.
   //     If the graph has a path a -> b, then we don't try adding edge b -> a.
   //   * We want our graph to use all its nodes. Not using all the nodes implies
-  //     that it's equivalen to a smaller graph that we would have explored
+  //     that it's equivalent to a smaller graph that we would have explored
   //     in a previous iteration.
   // - We have a hash function over the graphs and use it to avoid duplicates.
   // - Once a graph is created, we try out every possible assignment over the
@@ -384,58 +384,90 @@ int main(void) {
   for (int i = 0; i < size; ++i)
     out_degree.emplace_back(UINT8_C(2), UINT8_C(2));
 
+  // Create all 1-edge graphs, where the edge is root-to-each other node.
+  // Skip hashing and cycle checking checking since they're unique by
+  // construction and skip reachability testing.
   std::vector<SimpleRootedDigraph> v;
-  v.emplace_back(SimpleRootedDigraph(out_degree));
 
+  // This holds all the graphs. The hash function must be high quality so as to
+  // uniquely identify each graph.
+  std::map<uint64_t, SimpleRootedDigraph> hashes;
+
+  if (size == 1) {
+    v.emplace_back(SimpleRootedDigraph(out_degree));
+  } else {
+    v.reserve(size - 1);
+    for (int i = 1; i < size; ++i) {
+      v.emplace_back(SimpleRootedDigraph(out_degree));
+      v.back().add_edge(0, i);
+    }
+    if (size == 2) {
+      assert(v.size() == 1);
+      hashes.insert({SimpleRootedDigraphHash{}(v.back()), v.back()});
+    }
+  }
+
+  if (size > 2) {
+    do {
 #ifndef NDEBUG
-  std::map<int, SimpleRootedDigraph> hashes;
+      std::map<uint64_t, SimpleRootedDigraph> v2_hashes;
 #else
-  std::set<int> hashes;
+      std::set<uint64_t> v2_hashes;
 #endif
-  do {
-    std::set<uint32_t> v2_hashes;
-    std::vector<SimpleRootedDigraph> v2;
-    for (const auto &g : v) {
-      for (int i = 0; i < size; ++i) {
-        auto [min_out_degree, max_out_degree] = g.out_degree_spec(i);
-        int out_degree = g.out_degree(i);
-        if (out_degree == max_out_degree)
-          continue;
-        for (int j = 1; j < size; ++j) {
-          if (i == j)
+      std::vector<SimpleRootedDigraph> v2;
+      for (const auto &g : v) {
+        for (int i = 0; i < size; ++i) {
+          auto [min_out_degree, max_out_degree] = g.out_degree_spec(i);
+          int out_degree = g.out_degree(i);
+          if (out_degree == max_out_degree)
             continue;
-          if (g.edge(i, j))
-            continue;
-          if (i == 0 || !g.has_path(j, i)) {
-            SimpleRootedDigraph g2(g);
-            g2.add_edge(i, j);
-            assert(g2.is_acyclic());
-            uint32_t hash = SimpleRootedDigraphHash{}(g2);
-            auto [it, did_insert] = v2_hashes.insert(hash);
-            if (did_insert) {
-              v2.push_back(g2);
-              if (g2.all_reachable()) {
+          for (int j = 1; j < size; ++j) {
+            if (i == j)
+              continue;
+            if (g.edge(i, j))
+              continue;
+            if (i == 0 || !g.has_path(j, i)) {
+              SimpleRootedDigraph g2(g);
+              g2.add_edge(i, j);
+              assert(g2.is_acyclic());
+              auto hash = SimpleRootedDigraphHash{}(g2);
 #ifndef NDEBUG
-                auto [it, did_insert] = hashes.insert({hash, v2.back()});
-                if (!did_insert) {
-                  if (it->second != v2.back()) {
-                    printf("Same hash=%xu but inequal graphs:\n", hash);
-                    it->second.dump();
-                    v2.back().dump();
-                    std::abort();
-                  }
+              auto [it, did_insert] = v2_hashes.insert({hash, g2});
+              if (!did_insert) {
+                if (it->second != g2) {
+                  printf("Same hash=%lx but inequal graphs:\n", hash);
+                  it->second.dump();
+                  v2.back().dump();
+                  std::abort();
                 }
+              }
 #else
-                hashes.insert(hash);
+              auto [_, did_insert] = v2_hashes.insert(hash);
 #endif
+              if (did_insert) {
+                v2.push_back(g2);
+                if (g2.all_reachable()) {
+                  auto [it, did_insert] = hashes.insert({hash, g2});
+                  (void)it;
+#ifndef NDEBUG
+                  if (!did_insert) {
+                    if (it->second != g2) {
+                      printf("Same hash=%lx but inequal graphs:\n", hash);
+                      it->second.dump();
+                      v2.back().dump();
+                      std::abort();
+                    }
+                  }
+#endif
+                }
               }
             }
           }
         }
       }
-    }
-    std::swap(v, v2);
-  } while (!v.empty());
+      std::swap(v, v2);
+    } while (!v.empty());
+  }
 
   std::vector<Ops> ops;
   for (int i = 0; i < size; ++i)
@@ -456,7 +488,7 @@ int main(void) {
               std::vector<std::tuple<SimpleRootedDigraph, std::vector<Ops>>>>(
               bucket_max + 1)); // TODO: this wastes a little memory.
 
-  for (const auto &[hash, graph] : hashes) {
+  for (const auto &[_, graph] : hashes) {
     std::vector<Ops> ops(size, FirstOp);
     int free_variable_count = 0;
     for (int i = 0; i < size; ++i) {
@@ -483,17 +515,6 @@ int main(void) {
     for (int i = 0; i != bucket_max; ++i) {
       if (buckets[free_variable_count][i].size() == 0)
         continue;
-      printf("%d %d %lu\n", free_variable_count, i,
-             buckets[free_variable_count][i].size());
-      continue;
-      if (buckets[free_variable_count][i].size() < 2)
-        continue;
-
-      // TODO: remove this, this is for development testing.
-      if (buckets[free_variable_count][i].size() > 100)
-        continue;
-      printf("== %lu (%d)\n", buckets[free_variable_count][i].size(), i);
-
       auto FTy = build_llvm_functiontype(free_variable_count, Context);
       std::vector<IR::Function> Fns;
       Fns.reserve(buckets[free_variable_count][i].size());
